@@ -97,3 +97,12 @@ uploads and separate compilation/execution servers.
 See [development](docs/development-guide/build-the-docs.md) for tests and formatting checks.
 [Build the documentation locally](docs/development-guide/build-the-docs.md#build-and-preview-the-documentation)
 to browse the full site with navigation and search at `http://127.0.0.1:8008`.
+
+### Whole-model multi-GPU scripts
+
+Reserve 1–8 GPUs for a complete program with
+`client.execute(program, gpu_count=N)`. The program runs once with the full
+GPU set visible and can execute its existing Python or `torchrun` command.
+KCoral holds the set through process-tree cleanup; the script owns communication.
+See [the whole-model inference example](examples/multi_gpu_inference/README.md)
+for both one-process and multi-process execution.
