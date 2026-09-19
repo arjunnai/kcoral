@@ -64,11 +64,10 @@ class GPURuntime:
     startup, not mid-run. Full tvm is optional; uploaded TIRx harnesses and
     libraries containing TVM modules need it."""
 
-    def __init__(self, *, warmup: bool = True) -> None:
+    def __init__(self) -> None:
         _require_torch_and_ffi()
         self._seeded_fnames: list[str] = []  # linecache keys to clear on reset
-        if warmup:
-            _warm_up()
+        _warm_up()
         self._process_state = process_state.snapshot()
         self._request_libraries: list[LoadedLibrary] = []
 
@@ -191,7 +190,8 @@ class GPURuntime:
 
         # Do not hide a poisoned context. The engine preserves the request's
         # instruction error while the parent replaces this worker process.
-        torch.cuda.synchronize()
+        for device in range(torch.cuda.device_count()):
+            torch.cuda.synchronize(device)
 
     def take_last_error(self) -> str | None:
         """Consume CUDA's thread-local last error, if one is pending.
@@ -216,8 +216,10 @@ class GPURuntime:
         self._request_libraries.clear()
         # CUDA errors are sticky within a process. Surface one so the parent can
         # replace this worker instead of returning its context to the pool.
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        self.synchronize()
+        for device in range(torch.cuda.device_count()):
+            with torch.cuda.device(device):
+                torch.cuda.empty_cache()
 
 
 def _call_site(frames: list[traceback.FrameSummary]) -> str:
@@ -449,30 +451,6 @@ def _library_dir() -> Path:
     return _LIBRARY_DIR
 
 
-class JobGPURuntime(GPURuntime):
-    """A fresh multi-device interpreter; launchers need no CUDA context."""
-
-    def __init__(self) -> None:
-        super().__init__(warmup=False)
-
-    def synchronize(self) -> None:
-        import torch
-
-        if torch.cuda.is_initialized():
-            for device in range(torch.cuda.device_count()):
-                torch.cuda.synchronize(device)
-
-    def take_last_error(self) -> str | None:
-        import torch
-
-        return super().take_last_error() if torch.cuda.is_initialized() else None
-
-    def reset(self) -> None:
-        # This interpreter always exits; it never returns CUDA state to a pool.
-        # Drain every device it used, without creating a context for a launcher.
-        self.synchronize()
-
-
 class _GPURuntimeFactory:
     """Two-phase, picklable factory used by spawned GPU workers."""
 
@@ -484,9 +462,6 @@ class _GPURuntimeFactory:
         if torch.cuda.is_initialized():  # guard future changes to preparation
             raise RuntimeError("GPU runtime preparation unexpectedly initialized CUDA")
         return GPURuntime
-
-    def for_job(self) -> GPURuntime:
-        return JobGPURuntime()
 
     def __call__(self) -> GPURuntime:
         return GPURuntime()

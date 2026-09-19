@@ -22,7 +22,6 @@ from .config import ServerConfig
 from .errors import ValidationError
 from .events import EventLogger
 from .health import HealthResponse
-from .job import JobCleanupError
 from .keys import is_blob_hash, verify_blob
 from .multipart import MultipartPart, encode_multipart, parse_multipart
 from .pool import PoolBusy, SubmitOutcome, WorkerPool
@@ -35,7 +34,7 @@ from .schemas import (
     parse_program,
     strict_json_loads,
 )
-from .worker import FINISH_REASON_LEVEL, WorkerCrashed, WorkerTimeout
+from .worker import FINISH_REASON_LEVEL, WorkerCleanupError, WorkerCrashed, WorkerTimeout
 
 _TRACEBACK_LIMIT = 8192
 _MESSAGE_LIMIT = 2048
@@ -338,12 +337,12 @@ def create_app(
             response = _error_response(503, "busy", "server saturated", request_id)
             response.headers["Retry-After"] = "1"
             return response
-        except JobCleanupError as exc:
+        except WorkerCleanupError as exc:
             finished(500, finish_reason="server_error", error_kind="engine", error_message=str(exc))
             return _error_response(
                 500,
                 "engine",
-                "GPU job cleanup was not confirmed; affected devices unavailable",
+                "worker cleanup was not confirmed; affected devices unavailable",
                 request_id,
             )
         except WorkerTimeout as exc:

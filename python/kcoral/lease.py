@@ -99,6 +99,9 @@ class NoopLeases:
     def abandon(self, gpu_id: None, holder: Worker) -> None:
         pass
 
+    def quarantine(self, gpu_ids: tuple[int, ...]) -> None:
+        pass
+
     def depth(self, gpu_id: None) -> int:
         return 0
 
@@ -119,7 +122,7 @@ class _LeaseRequest:
 
 
 class GPULeases:
-    """Shared arbitration for pinned workers and atomic whole-job GPU sets.
+    """Shared arbitration for workers bound to one GPU or a fixed set.
 
     A waiting set never holds a subset. Older requests reserve their place in
     the queue; independent pinned-device requests can still pass one another.
@@ -135,8 +138,9 @@ class GPULeases:
             gpu: deque(maxlen=256) for gpu in gpu_ids
         }
 
-    def acquire(self, gpu_id: int, holder: Worker) -> float:
-        result = self._acquire(_LeaseRequest(holder, Ticket(), (gpu_id,)))
+    def acquire(self, gpu_id: int | tuple[int, ...], holder: Worker) -> float:
+        devices = (gpu_id,) if isinstance(gpu_id, int) else gpu_id
+        result = self._acquire(_LeaseRequest(holder, Ticket(), devices))
         assert result is not None
         return result[1]
 
@@ -173,8 +177,8 @@ class GPULeases:
             self._unavailable.update(gpu_ids)
             self._dispatch_locked()
 
-    def release(self, gpu_id: int, holder: Worker) -> None:
-        self.release_many((gpu_id,), holder)
+    def release(self, gpu_id: int | tuple[int, ...], holder: Worker) -> None:
+        self.release_many((gpu_id,) if isinstance(gpu_id, int) else gpu_id, holder)
 
     def release_many(self, gpu_ids: tuple[int, ...], holder: object) -> None:
         with self._lock:
@@ -187,7 +191,7 @@ class GPULeases:
                     self._held_since_ns[gpu] = None
             self._dispatch_locked()
 
-    def abandon(self, gpu_id: int, holder: Worker) -> None:
+    def abandon(self, gpu_id: int | tuple[int, ...], holder: Worker) -> None:
         with self._lock:
             self._waiters = [entry for entry in self._waiters if entry.holder is not holder]
         self.release(gpu_id, holder)
@@ -199,7 +203,7 @@ class GPULeases:
                 entry.gpu_ids is not None and self._unavailable.intersection(entry.gpu_ids)
             ) or entry.count > len(self._holder) - len(self._unavailable):
                 self._waiters.remove(entry)
-                entry.ticket.value = GPUUnavailable("GPU job cleanup failed; device unavailable")
+                entry.ticket.value = GPUUnavailable("worker cleanup failed; device unavailable")
                 entry.ticket.event.set()
                 continue
             if entry.gpu_ids is None:
