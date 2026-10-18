@@ -20,11 +20,14 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from multiprocessing import reduction
 from multiprocessing.connection import wait
 from pathlib import Path
 
+from kcoral.runtime import transfer
 from kcoral.runtime.engine import execute, read_captured_output
+from kcoral.runtime.gpu import GPURuntime
 from kcoral.runtime.lease import GPULeases, GPUUnavailable, LeaseClient, NoopLease, NoopLeases
 from kcoral.server.events import EventLogger
 from kcoral.support import cuda as nvml
@@ -159,15 +162,21 @@ def worker_main(
             if cleanup_error is None:
                 cleanup_error = exc
 
-        outcome = execute(
-            program,
-            runtime,
-            lease=lease,
-            progress=lambda index: conn.send({"__instruction__": index}),
-            cleanup_failed=mark_cleanup_failed,
-            capture_dir=capture_dir,
-            workspace_dir=workspace_dir,
-        )
+        with transfer.mapped_blobs(conn, program.blob_bytes) as blobs:
+            program.blob_bytes = (
+                blobs
+                if type(runtime) is GPURuntime
+                else {key: bytes(value) for key, value in blobs.items()}
+            )
+            outcome = execute(
+                program,
+                runtime,
+                lease=lease,
+                progress=lambda index: conn.send({"__instruction__": index}),
+                cleanup_failed=mark_cleanup_failed,
+                capture_dir=capture_dir,
+                workspace_dir=workspace_dir,
+            )
         sandbox_cleanup_error = None
         if request_state is not None:
             try:
@@ -534,7 +543,19 @@ class Worker:
         held_since: float | None = None
         instruction_index: int | None = None
         try:
-            self._conn.send((program, workspace_dir))
+            if hasattr(program, "blob_bytes"):
+                with transfer.pack_blobs(program.blob_bytes) as (blobs, fds):
+                    message = replace(program, blob_bytes=blobs) if fds else program
+                    self._conn.send((message, workspace_dir))
+                    for fd in fds:
+                        try:
+                            reduction.send_handle(self._conn, fd, self.pid)
+                        except RuntimeError as exc:
+                            if str(exc) != "did not receive acknowledgement of fd":
+                                raise
+                            raise OSError(str(exc)) from exc
+            else:
+                self._conn.send((program, workspace_dir))
             while True:
                 waited_from = time.monotonic()
                 if not self._poll_response(remaining):  # no answer by the deadline -> hung
