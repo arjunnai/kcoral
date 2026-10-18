@@ -1,10 +1,13 @@
 """Sealed-buffer transport through real worker lifetime boundaries."""
 
+import array
 import gc
 import os
+import socket
 import sys
 import warnings
-from multiprocessing import reduction
+from contextlib import ExitStack
+from multiprocessing import Pipe, reduction
 
 import pytest
 from support.runtime import FakeRuntime
@@ -85,11 +88,20 @@ def test_large_and_small_inputs_have_identical_numeric_results(worker, size, mon
         return original(message)
 
     monkeypatch.setattr(worker._conn, "send", send)
+    received, receive = [], transfer._recv_handle
+
+    def recv(conn):
+        fd = receive(conn)
+        received.append(fd)
+        return fd
+
+    monkeypatch.setattr(transfer, "_recv_handle", recv)
     pid, before = worker.pid, fd_count()
     for _ in range(2):
         check_result(worker, b"\3" * size)
         assert worker.pid == pid and fd_count() == before
     assert sent == [size >= transfer.MEMFD_THRESHOLD] * 2
+    assert len(received) == 2 * (size >= transfer.MEMFD_THRESHOLD)
 
 
 def test_memfd_unavailable_preserves_the_result(worker, monkeypatch):
@@ -130,3 +142,44 @@ def test_large_input_failures_do_not_leak_parent_fds(worker, failure, monkeypatc
     assert worker.pid != pid
     check_result(worker, data)
     assert fd_count() == before
+
+
+@pytest.mark.parametrize(
+    "fault", ["unsealed", "wrong_size", "too_large", "extra", "ctrunc", "non_memfd"]
+)
+def test_hostile_handles_are_rejected_without_leaking(fault, monkeypatch):
+    sender, receiver = Pipe()
+    with ExitStack() as cleanup, sender, receiver:
+        if fault in ("unsealed", "wrong_size", "too_large"):
+            import fcntl
+
+            stream = cleanup.enter_context(os.fdopen(transfer._memfd_create(), "wb"))
+            stream.truncate(transfer.MEMFD_THRESHOLD - (fault == "wrong_size"))
+            if fault != "unsealed":
+                fcntl.fcntl(stream.fileno(), getattr(fcntl, "F_ADD_SEALS", 1033), transfer._seals())
+            fds = [stream.fileno()]
+        else:
+            fds = [
+                cleanup.enter_context(open(os.devnull, "rb")).fileno()
+                for _ in range(1 if fault == "non_memfd" else 3 if fault == "ctrunc" else 2)
+            ]
+        with socket.fromfd(sender.fileno(), socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.sendmsg(
+                [b"\1"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds).tobytes())]
+            )
+        if fault == "ctrunc":
+            space = socket.CMSG_SPACE
+            monkeypatch.setattr(
+                transfer.socket, "CMSG_SPACE", lambda _n: space(array.array("i").itemsize)
+            )
+        before = fd_count()
+        with (
+            pytest.raises(OSError),
+            transfer.mapped_blobs(
+                receiver,
+                {"blob": transfer.BlobHandle(transfer.MEMFD_THRESHOLD)},
+                max_bytes=transfer.MEMFD_THRESHOLD - 1 if fault == "too_large" else None,
+            ),
+        ):
+            pass
+        assert fd_count() == before

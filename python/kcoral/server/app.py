@@ -483,12 +483,13 @@ def create_app(
             payload["error"] = execution.error
 
         response_body, content_type = _encode_response(payload, execution.binary_parts)
-        if len(response_body) > config.max_response_bytes:
+        response_bytes = max(len(response_body), execution._response_bytes)
+        if response_bytes > config.max_response_bytes:
             finished(
                 500,
                 finish_reason="server_error",
                 error_kind="response_too_large",
-                response_bytes=len(response_body),
+                response_bytes=response_bytes,
                 worker_id=outcome.worker_id,
                 gpu_id=outcome.gpu_id,
                 queue_ms=outcome.queue_ms,

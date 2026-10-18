@@ -117,3 +117,4 @@ class ProgramOutcome:
     stderr: str = ""
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    _response_bytes: int = 0  # Internal raw-size lower bound when binary parts were omitted.
