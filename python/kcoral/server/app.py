@@ -176,7 +176,10 @@ def create_app(
                 try:
                     await asyncio.to_thread(app.state.upload_executor.shutdown, wait=True)
                 finally:
-                    await app.state.pool.shutdown_async()
+                    try:
+                        await app.state.pool.shutdown_async()
+                    finally:
+                        app.state.cache.close()
 
         try:
             if config.router_endpoint is not None:
@@ -359,6 +362,7 @@ def create_app(
                 **_program_shape(program),
             )
         cache.pin(cache_keys)
+        program._blob_cache = cache
         # A crash the engine can attribute to an instruction still answers 200
         # with a FAILED program; these carry its cause onto that record.
         crash_exitcode: int | None = None

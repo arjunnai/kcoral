@@ -43,13 +43,19 @@ class BlobHandle:
 
 
 @contextmanager
-def pack_blobs(blobs):
+def pack_blobs(blobs, cache=None):
     fds, packed = [], blobs.copy()
     with ExitStack() as cleanup:
         try:
             if sys.platform == "linux":
                 for key, data in blobs.items():
                     if len(data) < MEMFD_THRESHOLD:
+                        continue
+                    cached_fd = cache.borrow_memfd(key) if cache is not None else None
+                    if cached_fd is not None:
+                        cleanup.callback(os.close, cached_fd)
+                        packed[key] = BlobHandle(len(data))
+                        fds.append(cached_fd)
                         continue
                     fd = _memfd_create()  # MFD_CLOEXEC | MFD_ALLOW_SEALING
                     cleanup.callback(os.close, fd)

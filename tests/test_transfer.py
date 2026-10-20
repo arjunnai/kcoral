@@ -183,3 +183,34 @@ def test_hostile_handles_are_rejected_without_leaking(fault, monkeypatch):
         ):
             pass
         assert fd_count() == before
+
+
+def test_cached_memfds_are_bounded_and_borrow_survives_eviction(monkeypatch):
+    from kcoral.server.cache import ByteCache
+
+    size = transfer.MEMFD_THRESHOLD
+    before = fd_count()
+    cache = ByteCache(2 * size, max_object_bytes=size)
+    monkeypatch.setattr(cache, "_MAX_FDS", 1)
+    cache.put("a", b"a" * size)
+    fd = cache.borrow_memfd("a")
+    assert fd is not None
+    assert cache._fd_count == 1
+    owned = cache._entries["a"].fd
+    cache.pin(["a"])
+    cache.put("b", b"b" * size)
+    assert cache.borrow_memfd("b") is None
+    cache.put("c", b"c" * size)
+    cache.unpin(["a"])
+    cache.put("d", b"d" * size)
+    with pytest.raises(OSError):
+        os.fstat(owned)
+    assert os.pread(fd, 1, 0) == b"a"
+    os.close(fd)
+    borrowed = cache.borrow_memfd("d")
+    assert borrowed is not None
+    cache.close()
+    assert os.pread(borrowed, 1, 0) == b"d"
+    os.close(borrowed)
+    cache.close()
+    assert fd_count() == before

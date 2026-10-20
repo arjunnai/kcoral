@@ -555,8 +555,8 @@ class Worker:
         instruction_index: int | None = None
         try:
             if hasattr(program, "blob_bytes"):
-                with transfer.pack_blobs(program.blob_bytes) as (blobs, fds):
-                    message = replace(program, blob_bytes=blobs) if fds else program
+                with transfer.pack_blobs(program.blob_bytes, program._blob_cache) as (blobs, fds):
+                    message = replace(program, blob_bytes=blobs, _blob_cache=None)
                     self._conn.send((message, workspace_dir))
                     for fd in fds:
                         try:
